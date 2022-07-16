@@ -1,4 +1,10 @@
 ### Project Specific stuff
+
+*.fir
+.metals
+.vscode
+*.jou
+
 test_run_dir/*
 ### XilinxISE template
 # intermediate build files
