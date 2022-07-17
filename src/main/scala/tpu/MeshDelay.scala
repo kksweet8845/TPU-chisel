@@ -25,14 +25,6 @@ class CascadeDelayShiftRegister[T <: Data](
         val out = Output(Vec(len, UInt(elemWidth.W)))
     })
 
-
-    // val cascade = io.in.zipWithIndex.map { case(ele, i) => {
-    //     val sr = ShiftRegister(ele, i+1)
-    //     val out = Wire(chiselTypeOf(sr))
-    //     out := sr
-    //     out
-    // }}
-
     val cascade = io.in.zip(alignMask).map { case(ele, m) => {
         val sr = ShiftRegister(ele, m)
         val out = Wire(chiselTypeOf(sr))
@@ -61,9 +53,7 @@ class MeshDelay[T <: Data](
         val in_a        = Input(Vec(rows, inputType))
         val in_b        = Input(Vec(columns, inputType))
         val in_d        = Input(Vec(columns, outputType))
-        // val out_a       = Output(Vec(rows, inputType))
-        // val out_b       = Output(Vec(columns, inputType))
-        // val out_c       = Output(Vec(columns, outputType))
+        val in_woff     = Input(UInt(log2Ceil(rows+1).W))
         
         val in_control  = Input(Vec(columns, new PEControl(accType)))
         val out_control = Output(Vec(columns, new PEControl(accType)))
@@ -71,6 +61,7 @@ class MeshDelay[T <: Data](
         val out_valid   = Output(Vec(columns, Bool()))
         val in_last     = Input(Vec(columns, Bool()))
         val out_last    = Output(Vec(columns, Bool()))
+        val out_woff    = Output(UInt(log2Ceil(rows+1).W))
 
         val out_psum        = Output(Vec(columns, outputType))
 
@@ -108,6 +99,7 @@ class MeshDelay[T <: Data](
     }
 
 
+
     val cascadeDelayC = Seq.tabulate(columns) { i => 
         // val ii = i + 1
         val sr = ShiftRegister(io.in_d(i), columns-i)
@@ -141,7 +133,10 @@ class MeshDelay[T <: Data](
         out
     }
 
+    // val cascadeDelayWoff = RegNext(io.in_woff)
+    val cascadeDelayWoff = ShiftRegister(io.in_woff, 1+rows, 0.U, true.B)
 
+    io.out_woff := cascadeDelayWoff
 
 
     for( r <- 0 until rows) {

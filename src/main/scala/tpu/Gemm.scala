@@ -28,9 +28,11 @@ class Accumulator[T <: Data](
         val in_psum     = Input(Vec(columns, outputType))
         val in_last     = Input(Vec(columns, Bool()))
         val in_valid    = Input(Vec(columns, Bool()))
+        val in_woff     = Input(UInt(log2Ceil(rows+1).W))
         val in_control  = Input(Vec(columns, new PEControl(accType)))        
         
         val out_sum     = Output(Vec(columns, Valid(accType)))
+        // val out_woff    = Output(UInt(log2Ceil(rows).W))
     })
 
 
@@ -39,6 +41,9 @@ class Accumulator[T <: Data](
     }
 
     // val state = RegInit(Fsm.Acc)
+    val woff = ShiftRegister(io.in_woff, columns, 0.U, true.B)
+
+    val woff_prv = RegInit(0.U(log2Ceil(rows+1).W))
 
     val (sr_psums, sr_lasts, sr_valids) = Seq.tabulate(columns) { i => 
 
@@ -49,21 +54,19 @@ class Accumulator[T <: Data](
         val sr_last = ShiftRegister(io.in_last(i), columns, false.B, true.B)
         val sr_valid = ShiftRegister(io.in_valid(i), columns, false.B, true.B)
 
-        val (cVal, cWrap) = Counter(state === Fsm.Output || state === Fsm.Init, 4)
+        val (cVal, cWrap) = Counter(state === Fsm.Output || state === Fsm.Init, rows)
 
         acc_psum := io.in_psum(i).asUInt + sr_psum.asUInt
         
-        // in_psum := Mux( sr_last , 0.U, Mux(sr_valid, acc_psum, sr_psum))
-        // in_psum := Mux( sr_last, acc_psum, )
-        // in_psum := Mux( state === Fsm.Output, io.in_psum(i).asUInt, Mux(sr_valid, acc_psum, sr_psum) )
         in_psum := Mux( state === Fsm.Output || state === Fsm.Init , Mux(sr_valid, io.in_psum(i).asUInt, 0.U), Mux(sr_valid, acc_psum, sr_psum))
-        // io.out_sum(i).bits := Mux( sr_last, acc_psum, 0.U )
-        // io.out_sum(i).bits := Mux( state === Output, sr_psum, 0.U)
         io.out_sum(i).bits := sr_psum
-        io.out_sum(i).valid := state === Fsm.Output
-        // io.out_sum(i).valid := sr_last
 
-
+        if(i == 0) {
+            io.out_sum(i).valid := state === Fsm.Output && cVal < woff_prv
+        } else {
+            io.out_sum(i).valid := state === Fsm.Output
+        }
+    
         switch(state) {
             is(Fsm.Init) {
                 when(cWrap) { state := Fsm.Acc }
@@ -74,7 +77,7 @@ class Accumulator[T <: Data](
                 }
             }
             is(Fsm.Output) {
-                when(cWrap) { state := Fsm.Acc }
+                when(cWrap && !sr_last) { state := Fsm.Acc }
             }
         }
 
@@ -83,6 +86,10 @@ class Accumulator[T <: Data](
         (sr_psum, sr_last, sr_valid)
     }.unzip3
     
+    when(sr_lasts(0)) {
+        woff_prv := woff
+    }
+
 }
 
 class StaticTransposer[T <: Data](
@@ -211,6 +218,7 @@ class GemmCore[T <: Data](
         val in_a        = Input(Vec(rows, inputType))
         val in_b        = Input(Vec(columns, inputType))
         val in_d        = Input(Vec(columns, outputType))
+        val in_woff     = Input(UInt(log2Ceil(rows+1).W))
         
         
         val in_control  = Input(Vec(columns, new PEControl(accType)))
@@ -220,7 +228,7 @@ class GemmCore[T <: Data](
         val in_last     = Input(Vec(columns, Bool()))
         
         val out_c       = Output(Valid(Vec(columns, accType)))
-
+        // val out_woff    = Output(UInt(log2Ceil(rows).W))
     })
 
 
@@ -234,7 +242,6 @@ class GemmCore[T <: Data](
 
 
     transposer.io.in.valid := Cat(io.in_valid).orR
-    // transposer.io.in.bits  := io.in_a
     transposer.io.in.bits.zipWithIndex.map { case (in, i) => {
         in := io.in_a(rows-1-i)
     }}
@@ -244,26 +251,27 @@ class GemmCore[T <: Data](
     meshWithDelay.io.in_a := Mux( transposer.io.out.valid,  transposer.io.out.bits, VecInit(Seq.fill(rows) { 0.U(transposer.io.out.bits.head.getWidth.W) }))
     meshWithDelay.io.in_b := io.in_b
     meshWithDelay.io.in_d := io.in_d
+    meshWithDelay.io.in_woff := io.in_woff
     meshWithDelay.io.in_control := io.in_control
     meshWithDelay.io.in_valid := io.in_valid
     meshWithDelay.io.in_last := io.in_last
 
-
+    
     accumulator.io.in_psum := meshWithDelay.io.out_psum
     accumulator.io.in_last := meshWithDelay.io.out_last
     accumulator.io.in_valid := meshWithDelay.io.out_valid
     accumulator.io.in_control := meshWithDelay.io.out_control
-
+    accumulator.io.in_woff     := meshWithDelay.io.out_woff
 
 
     wbAlignShiftRegister.io.in.zipWithIndex.map {case (in, i) => {
         in := accumulator.io.out_sum(i).bits
     }}
 
-    // val valid = RegNext( accumulator.io.out_sum(0).valid )
-    val valid = ShiftRegister(accumulator.io.out_sum(0).valid, 4, false.B, true.B)
+    val valid = ShiftRegister(accumulator.io.out_sum(0).valid, columns, false.B, true.B)
 
     io.out_c.bits     := wbAlignShiftRegister.io.out
     io.out_c.valid    := valid
+    // io.out_woff       := woff
 }
 

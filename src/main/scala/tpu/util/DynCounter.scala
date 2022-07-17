@@ -22,6 +22,7 @@ class DynCounter(gen: UInt, until: UInt, step: Int) {
         }.otherwise {
             wrap := value === (until - 1.U)
         }
+        // val wrap = isLast()
 
 
         if(step > 0) {
@@ -37,15 +38,26 @@ class DynCounter(gen: UInt, until: UInt, step: Int) {
         wrap
     }
 
+    def isLast() : Bool = {
+        val wrap = Wire(Bool())
+        when(until === 0.U) {
+            wrap := true.B
+        }.otherwise {
+            wrap := value === (until - 1.U)
+        }
+        wrap
+    }
+
 }
 
 
 object DynCounter {
-    def apply(en: Bool, gen: UInt, until: UInt, step: Int): (UInt, Bool) = {
+    def apply(en: Bool, gen: UInt, until: UInt, step: Int): (UInt, Bool, Bool) = {
         val c = new DynCounter(gen, until, step)
         val wrap = WireInit(false.B)
+        val onLast = c.isLast()
         when(en) { wrap := c.inc() }
-        (c.value.asUInt, wrap)
+        (c.value.asUInt, wrap, onLast)
     }
 }
 

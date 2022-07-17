@@ -31,6 +31,7 @@ class WbController[T <: Data](
         val start       = Input(Bool())
         val csr         = Input(new ControlRegIO)
         val in_c        = Flipped(Valid(Vec(columns, accType)))
+        // val in_woff     = Input(UInt(log2Ceil(rows).W))
         val C           = Flipped(new SramIO(addrBits, accDataBits*elePerGroup))
         val finished    = Output(Bool())
     })
@@ -65,7 +66,6 @@ class WbController[T <: Data](
 
     freg := io.C.wr_en && cPtr.fp.ptr === (io.csr.N_g * io.csr.M - 1.U)
     io.finished := freg
-    // io.finished := (cur_fsm === Fsm.Running) && cPtr.fp.ptr === (io.csr.N_g * io.csr.M - 1.U) && io.C.wr_en
 
     io.C.wr_en := (cur_fsm === Fsm.Running) && (io.in_c.valid)
     io.C.index := cPtr.fp.ptr

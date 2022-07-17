@@ -68,7 +68,7 @@ class InputAddrGenUnit(
 
         val A           = Flipped(new SramIO(addrBits, inDataBits*elePerGroup))
         val B           = Flipped(new SramIO(addrBits, inDataBits*elePerGroup))
-        val data_valid  = Output(Bool())
+        val data_valid  = Output(Vec(columns, Bool()))
         val A_outbound  = Output(Bool())
         val B_outbound  = Output(Bool())
         val out_last    = Output(Bool())
@@ -99,13 +99,6 @@ class InputAddrGenUnit(
     val aPtr                       = prefix("aPtr") { FifoPtr.makeUpdatePtr(pow(2, addrBits).toInt) }
     val bPtr                       = prefix("bPtr") { FifoPtr.makeUpdatePtr(pow(2, addrBits).toInt) }
 
-    // M_4 := io.M >> 2;
-    // N_4 := io.N >> 2;
-    // K_4 := io.K >> 2;
-
-    // M_g := Mux((M(1,0) === 0.U), M_4, M_4+1.U)
-    // N_g := Mux(N(1,0) === 0.U, N_4, N_4+1.U)
-    // K_g := Mux(K(1,0) === 0.U, K_4, K_4 + 1.U)
 
 
     object SchedulerFsm extends ChiselEnum {
@@ -116,9 +109,11 @@ class InputAddrGenUnit(
     val cur_fsm = withReset(reset.asAsyncReset) { RegInit(SchedulerFsm.Idle) }
     // val nxt_fsm = Wire(chiselTypeOf(cur_fsm))
 
-    val data_valid = withReset(reset.asAsyncReset) { WireInit(false.B) }
+    // val data_valid = withReset(reset.asAsyncReset) { WireInit(false.B) }
+    val valid_bytelane = withReset(reset.asAsyncReset) { WireInit(VecInit(Seq.fill(columns) {false.B} )) }
 
-    io.data_valid := data_valid
+    // io.data_valid := data_valid
+    io.data_valid := valid_bytelane
 
     // cur_fsm := nxt_fsm
 
@@ -130,13 +125,17 @@ class InputAddrGenUnit(
     io.B.index := bPtr.fp.ptr
     io.B.data_in := DontCare
 
-    val (tileVal, tileWrap) = Counter((cur_fsm === SchedulerFsm.Fetching), 4)
-    val (kVal, kWrap) = DynCounter(tileWrap, chiselTypeOf(K), K_g, 1)
-    val (nVal, nWrap) = DynCounter(kWrap, chiselTypeOf(N), N_g, 1)
-    val (mVal, mWrap) = DynCounter(nWrap, chiselTypeOf(M), M_g, 1)
+    val (tileVal, tileWrap) = Counter((cur_fsm === SchedulerFsm.Fetching), columns)
+    val (kVal, kWrap, kOnLast) = DynCounter(tileWrap, chiselTypeOf(K), K_g, 1)
+    val (mVal, mWrap, mOnLast) = DynCounter(kWrap, chiselTypeOf(M), M_g, 1)
+    val (nVal, nWrap, nOnLast) = DynCounter(mWrap, chiselTypeOf(N), N_g, 1)
 
-    io.A_outbound := kWrap && (aPtr.fp.ptr(1,0) > K(1,0))
-    io.B_outbound := (kWrap && (bPtr.fp.ptr(1,0) > K(1,0))) || ((cur_fsm === SchedulerFsm.DetermineInitAddr) && K(7,2) =/= 0.U && bPtr.fp.ptr(1,0) > K(1,0))
+
+    val cntOff = Wire(chiselTypeOf(aPtr.fp.ptr))
+    cntOff := (aPtr.fp.ptr(1,0) + K(1,0)) 
+
+    io.A_outbound := kOnLast && K(1,0) =/= 0.U && ((aPtr.fp.ptr - A_base) >= K)
+    io.B_outbound := (kOnLast && K(1,0) =/= 0.U && ((bPtr.fp.ptr - B_base) >= K )) || ((cur_fsm === SchedulerFsm.DetermineInitAddr) && K(7,2) =/= 0.U && bPtr.fp.ptr(1,0) > K(1,0))
     io.out_last   := kWrap
 
 
@@ -144,23 +143,22 @@ class InputAddrGenUnit(
     when((cur_fsm === SchedulerFsm.Idle)) {
         A_base := 0.U
     }.elsewhen((cur_fsm === SchedulerFsm.Fetching)) {
-        when(nWrap) { A_base := A_base + K }
+        when(mWrap) { A_base := 0.U }
+        .elsewhen(kWrap) { A_base := A_base + K }
     }
 
     when((cur_fsm === SchedulerFsm.Idle)) {
         B_base := 0.U
     }.elsewhen((cur_fsm === SchedulerFsm.Fetching)) {
-        when(kWrap) { B_base := B_base + K }
+        when(mWrap) { B_base := B_base + K }
     }
 
-    // when((cur_fsm === SchedulerFsm.Idle))             { data_valid := false.B }
-    // .elsewhen(cur_fsm === SchedulerFsm.DetermineInitAddr) { data_valid := true.B }
-    // .elsewhen((cur_fsm === SchedulerFsm.Fetching))    { data_valid := true.B }
-    // .elsewhen((cur_fsm === SchedulerFsm.WaitWB))      { data_valid := false.B }
-    // .otherwise(cur_fsm === SchedulerFsm.Finish)       { data_valid := false.B }
+    //* A byte lane
+    valid_bytelane.zipWithIndex.map{ case(valid, i) => {
+        val mask = rows - 1 - i
+        valid := !(M(1,0) =/= 0.U && mOnLast && mask.U >= M(1,0)) && (cur_fsm === SchedulerFsm.Fetching)
+    }}
 
-    when((cur_fsm === SchedulerFsm.Fetching)) { data_valid := true.B }
-    .otherwise { data_valid := false.B }
 
 
     when((cur_fsm === SchedulerFsm.Idle)) {
@@ -178,38 +176,15 @@ class InputAddrGenUnit(
         }
         is(SchedulerFsm.DetermineInitAddr) {
             aPtr.fpIn := aPtr.fp.copy(A_base, false.B)
-            bPtr.fpIn := bPtr.fp.copy(B_base + bPtr.fp.ptr + 3.U, false.B)
+            bPtr.fpIn := bPtr.fp.copy(B_base + 3.U, false.B)
             aPtr.update := true.B
             bPtr.update := true.B
-            // when(K =/= 0.U && K_4 =/= 0.U) {
-            //     Bptr.ptr := B_base + Bptr.ptr + 3.U
-            // }.elsewhen(K =/= 0.U && K_4 < 4.U) {
-            //     Bptr.ptr := B_base + Bptr.ptr + K(1, 0)
-            // }.otherwise {
-            //     Bptr.ptr := 0.U
-            // }
         }
         is(SchedulerFsm.Fetching) {
-            // when(tileWrap) {
-            //     // aptr.plus1
-            //     // aPtr.update := true.B
-            //     bPtr.fpIn := bPtr.fp.copy(bPtr.fp.ptr + 7.U, false.B)
-            //     bPtr.update := true.B
-            // }.otherwise {
-            //     // aPtr.update := true.B
-            //     bPtr.fpIn := bPtr.fp.minus1
-            //     bPtr.update := true.B
-            // }
-
-            // when(kWrap) {
-            //     // aptr.ptr := B_base + K
-            //     aPtr.fpIn := aPtr.fp.copy(A_base + K, false.B)
-            //     aPtr.update := true.B
-            // }.otherwise{
-            //     aPtr.update := false.B
-            // }
-
-            when(kWrap) {
+            when(mWrap) {
+                aPtr.fpIn := aPtr.fp.copy(0.U, false.B)
+                aPtr.update := true.B
+            }.elsewhen(kWrap) {
                 aPtr.fpIn := aPtr.fp.copy(A_base + K, false.B)
                 aPtr.update := true.B
             }.elsewhen(tileWrap) {
@@ -218,8 +193,11 @@ class InputAddrGenUnit(
                 aPtr.update := true.B
             }
 
-            when(nWrap) {
-                bPtr.fpIn := bPtr.fp.copy(B_base + K, false.B)
+            when(mWrap) {
+                bPtr.fpIn := bPtr.fp.copy(B_base + K + 3.U, false.B)
+                bPtr.update := true.B
+            }.elsewhen(kWrap){
+                bPtr.fpIn := bPtr.fp.copy(B_base + 3.U, false.B)
                 bPtr.update := true.B
             }.elsewhen(tileWrap) {
                 bPtr.fpIn := bPtr.fp.copy(bPtr.fp.ptr + 7.U, false.B)
@@ -229,13 +207,6 @@ class InputAddrGenUnit(
                 bPtr.update := true.B
             }
             
-            // when(nWrap) {
-            //     bPtr.fpIn := bPtr.fp.copy(B_base + K, false.B)
-            //     bPtr.update := true.B
-            //     // bptr.ptr := B_base + K
-            // }.otherwise{
-            //     bPtr.update := false.B
-            // }
         }
     }
     
@@ -251,7 +222,7 @@ class InputAddrGenUnit(
             cur_fsm := SchedulerFsm.Fetching
         }
         is(SchedulerFsm.Fetching) {
-            when(mWrap) { cur_fsm := SchedulerFsm.WaitWB }
+            when(nWrap) { cur_fsm := SchedulerFsm.WaitWB }
             .otherwise { cur_fsm := SchedulerFsm.Fetching }
         }
         is(SchedulerFsm.WaitWB) {
@@ -286,9 +257,11 @@ class InputDataController[T <: Data](
     val io = IO(new Bundle {
         val start = Input(Bool())
         
-        val A_data_in = Flipped(Valid(UInt((inDataBits*elePerGroup).W)))
+        val A_data_in =  Input(UInt((inDataBits*elePerGroup).W))
+        val A_data_mask = Input(Vec(rows, Bool()))
         val A_outbound = Input(Bool())
-        val B_data_in = Flipped(Valid(UInt((inDataBits*elePerGroup).W)))
+        val B_data_in = Input(UInt((inDataBits*elePerGroup).W))
+        val B_data_mask = Input(Vec(columns, Bool()))
         val B_outbound = Input(Bool())
         val in_last     = Input(Bool())
         
@@ -299,6 +272,7 @@ class InputDataController[T <: Data](
         val out_control = Output(Vec(columns, new PEControl(accType)))
         val out_valid   = Output(Vec(columns, Bool())) //* valid when the weight or accumulate is true
         val out_last    = Output(Vec(columns, Bool()))
+        val out_woff    = Output(UInt(log2Ceil(rows+1).W))
 
         val wb_finished = Input(Bool())
     })
@@ -311,18 +285,21 @@ class InputDataController[T <: Data](
     val cur_fsm = RegInit(CtrlFsm.Idle)
     // val nxt_fsm = Wire(chiselTypeOf(cur_fsm))
 
-    val A_data_valid = io.A_outbound && io.A_data_in.valid
-    val B_data_valid = io.B_outbound && io.B_data_in.valid
+    val A_data_valid = io.A_data_mask.asUInt.orR
+    val B_data_valid = io.B_data_mask.asUInt.orR
     val A_data = Seq.tabulate(rows) { i => {
         val lo = i*inDataBits
         val hi = i*inDataBits + inDataBits - 1
-        val data = Mux(A_data_valid, 0.U(inDataBits.W), io.A_data_in.bits(hi, lo))
+        // val data = Mux(A_data_valid, 0.U(inDataBits.W), io.A_data_in.bits(hi, lo))
+        val data = Mux(io.A_outbound || !A_data_valid, 0.U(inDataBits.W), io.A_data_in(hi, lo) )
         data
     }}
     val B_data = Seq.tabulate(columns) { i => {
         val lo = i*inDataBits
         val hi = i*inDataBits + inDataBits - 1
-        val data = Mux(B_data_valid, 0.U(inDataBits.W), io.B_data_in.bits(hi, lo))
+
+        // val data = Mux(B_data_valid, 0.U(inDataBits.W), io.B_data_in.bits(hi, lo))
+        val data = Mux(io.B_outbound || !B_data_valid, 0.U(inDataBits.W), io.B_data_in(hi, lo) )
         data
     }}
 
@@ -351,7 +328,7 @@ class InputDataController[T <: Data](
     }
 
 
-    val (cntVal, cntWrap) = Counter(io.A_data_in.valid && io.B_data_in.valid, 4)
+    val (cntVal, cntWrap) = Counter(A_data_valid && B_data_valid, 4)
     val prog = RegInit(false.B)
     
     when((cur_fsm === CtrlFsm.Idle)) {
@@ -360,15 +337,18 @@ class InputDataController[T <: Data](
         prog := ~prog
     }
 
-    //TODO support WS
+    //TODO only support WS
     for(c <- 0 until columns) {
         io.out_control(c).dataflow     := dataflow
         io.out_control(c).propagate    := prog
         io.out_control(c).shift        := 0.U
 
-        io.out_valid(c)             := io.B_data_in.valid
+        // io.out_valid(c)             := io.B_data_mask(c)
+        io.out_valid(c)             := B_data_valid
         io.out_last(c)              := io.in_last
     }
+
+    io.out_woff := io.A_data_mask.map(_.asUInt).reduce( _.asUInt +& _.asUInt )
 
 
     switch(cur_fsm) {
@@ -376,7 +356,7 @@ class InputDataController[T <: Data](
             when(io.start) { cur_fsm := CtrlFsm.Controlling }
         }
         is(CtrlFsm.Controlling) {
-            when(!io.A_data_in.valid) { cur_fsm := CtrlFsm.Finish }
+            when(!A_data_valid) { cur_fsm := CtrlFsm.Finish }
         }
         is(CtrlFsm.Finish) {
             when(io.wb_finished) { cur_fsm := CtrlFsm.Idle }
@@ -429,12 +409,12 @@ class TPUCoreWrapper(
 
     //* Input Controller
     inCtrl.io.start := io.start
-    inCtrl.io.A_data_in.valid := inAGU.io.data_valid
-    inCtrl.io.A_data_in.bits  := io.A.data_out
+    inCtrl.io.A_data_in       := io.A.data_out
+    inCtrl.io.A_data_mask     := inAGU.io.data_valid
     inCtrl.io.A_outbound      := inAGU.io.A_outbound
-    inCtrl.io.B_data_in.valid := inAGU.io.data_valid
-    inCtrl.io.B_data_in.bits  := io.B.data_out
+    inCtrl.io.B_data_in       := io.B.data_out
     inCtrl.io.B_outbound      := inAGU.io.B_outbound
+    inCtrl.io.B_data_mask     := inAGU.io.data_valid
     inCtrl.io.in_last         := inAGU.io.out_last
     inCtrl.io.wb_finished     := wbUnit.io.finished
 
@@ -447,6 +427,7 @@ class TPUCoreWrapper(
     gemm.io.in_control := inCtrl.io.out_control
     gemm.io.in_valid   := inCtrl.io.out_valid
     gemm.io.in_last    := inCtrl.io.out_last
+    gemm.io.in_woff    := inCtrl.io.out_woff
 
 
     //* wbUnit
@@ -523,8 +504,6 @@ class TPU(
     M_g := Mux((M_o(1,0) === 0.U), M_4, M_4+1.U)
     N_g := Mux(N_o(1,0) === 0.U, N_4, N_4+1.U)
     K_g := Mux(K_o(1,0) === 0.U, K_4, K_4 + 1.U)
-
-    // val csr = ControlRegIO(K_o, M_o, N_o, K_4, M_4, N_4, K_g, M_g, N_g)
     val csr = Wire(new ControlRegIO)
     csr.K := K_o
     csr.M := M_o
