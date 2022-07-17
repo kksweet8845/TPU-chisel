@@ -7,7 +7,7 @@ import scalalib._
 // support BSP
 import mill.bsp._
 
-object TPU-chisel extends SbtModule { m =>
+object TPU_chisel extends SbtModule { m =>
   override def millSourcePath = os.pwd
   override def scalaVersion = "2.13.8"
   override def scalacOptions = Seq(
