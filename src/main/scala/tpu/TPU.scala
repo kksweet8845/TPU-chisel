@@ -109,14 +109,14 @@ class InputAddrGenUnit(
 
 
     object SchedulerFsm extends ChiselEnum {
-        val Idle, DetermineInitAddr, Fetching, WaitWB, Finish = Value
+        val Idle, DetermineInitAddr, Fetching, DataGet, WaitWB, Finish = Value
     }
 
 
     val cur_fsm = withReset(reset.asAsyncReset) { RegInit(SchedulerFsm.Idle) }
     // val nxt_fsm = Wire(chiselTypeOf(cur_fsm))
 
-    val data_valid = withReset(reset.asAsyncReset) { RegInit(Bool(), false.B) }
+    val data_valid = withReset(reset.asAsyncReset) { WireInit(false.B) }
 
     io.data_valid := data_valid
 
@@ -153,9 +153,15 @@ class InputAddrGenUnit(
         when(kWrap) { B_base := B_base + K }
     }
 
-    when((cur_fsm === SchedulerFsm.Idle))             { data_valid := false.B }
-    .elsewhen((cur_fsm === SchedulerFsm.Fetching))    { data_valid := true.B }
-    .elsewhen((cur_fsm === SchedulerFsm.WaitWB))      { data_valid := false.B }
+    // when((cur_fsm === SchedulerFsm.Idle))             { data_valid := false.B }
+    // .elsewhen(cur_fsm === SchedulerFsm.DetermineInitAddr) { data_valid := true.B }
+    // .elsewhen((cur_fsm === SchedulerFsm.Fetching))    { data_valid := true.B }
+    // .elsewhen((cur_fsm === SchedulerFsm.WaitWB))      { data_valid := false.B }
+    // .otherwise(cur_fsm === SchedulerFsm.Finish)       { data_valid := false.B }
+
+    when((cur_fsm === SchedulerFsm.Fetching)) { data_valid := true.B }
+    .otherwise { data_valid := false.B }
+
 
     when((cur_fsm === SchedulerFsm.Idle)) {
         kVal := 0.U
@@ -293,11 +299,13 @@ class InputDataController[T <: Data](
         val out_control = Output(Vec(columns, new PEControl(accType)))
         val out_valid   = Output(Vec(columns, Bool())) //* valid when the weight or accumulate is true
         val out_last    = Output(Vec(columns, Bool()))
+
+        val wb_finished = Input(Bool())
     })
 
 
     object CtrlFsm extends ChiselEnum {
-        val Idle, Controlling = Value
+        val Idle, Controlling, Finish = Value
     }
 
     val cur_fsm = RegInit(CtrlFsm.Idle)
@@ -343,12 +351,12 @@ class InputDataController[T <: Data](
     }
 
 
-    val (cntVal, cntWrap) = Counter((cur_fsm === CtrlFsm.Controlling) && io.A_data_in.valid && io.B_data_in.valid, 4)
+    val (cntVal, cntWrap) = Counter(io.A_data_in.valid && io.B_data_in.valid, 4)
     val prog = RegInit(false.B)
     
     when((cur_fsm === CtrlFsm.Idle)) {
         prog := false.B
-    }.elsewhen((cur_fsm === CtrlFsm.Controlling) && cntWrap) {
+    }.elsewhen(cntWrap) {
         prog := ~prog
     }
 
@@ -366,11 +374,12 @@ class InputDataController[T <: Data](
     switch(cur_fsm) {
         is(CtrlFsm.Idle) {
             when(io.start) { cur_fsm := CtrlFsm.Controlling }
-            .otherwise { cur_fsm := CtrlFsm.Idle }
         }
         is(CtrlFsm.Controlling) {
-            when(!io.A_data_in.valid) { cur_fsm := CtrlFsm.Idle }
-            .otherwise { cur_fsm := CtrlFsm.Controlling }
+            when(!io.A_data_in.valid) { cur_fsm := CtrlFsm.Finish }
+        }
+        is(CtrlFsm.Finish) {
+            when(io.wb_finished) { cur_fsm := CtrlFsm.Idle }
         }
     }
 
@@ -427,6 +436,7 @@ class TPUCoreWrapper(
     inCtrl.io.B_data_in.bits  := io.B.data_out
     inCtrl.io.B_outbound      := inAGU.io.B_outbound
     inCtrl.io.in_last         := inAGU.io.out_last
+    inCtrl.io.wb_finished     := wbUnit.io.finished
 
 
     //* gemm
@@ -516,9 +526,9 @@ class TPU(
 
     // val csr = ControlRegIO(K_o, M_o, N_o, K_4, M_4, N_4, K_g, M_g, N_g)
     val csr = Wire(new ControlRegIO)
-    csr.K := K
-    csr.M := M
-    csr.N := N
+    csr.K := K_o
+    csr.M := M_o
+    csr.N := N_o
     csr.K_4 := K_4
     csr.M_4 := M_4
     csr.N_4 := N_4

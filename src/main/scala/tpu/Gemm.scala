@@ -33,22 +33,56 @@ class Accumulator[T <: Data](
         val out_sum     = Output(Vec(columns, Valid(accType)))
     })
 
+
+    object Fsm extends ChiselEnum {
+        val Init, Acc, Output = Value
+    }
+
+    // val state = RegInit(Fsm.Acc)
+
     val (sr_psums, sr_lasts, sr_valids) = Seq.tabulate(columns) { i => 
-        val in_psum = Wire(outputType)
-        val acc_psum = Wire(outputType)
+
+        val state = RegInit(Fsm.Init).suggestName(s"state_$i")
+        val in_psum = Wire(accType)
+        val acc_psum = Wire(accType)
         val sr_psum = ShiftRegister(in_psum, columns)
         val sr_last = ShiftRegister(io.in_last(i), columns, false.B, true.B)
         val sr_valid = ShiftRegister(io.in_valid(i), columns, false.B, true.B)
+
+        val (cVal, cWrap) = Counter(state === Fsm.Output || state === Fsm.Init, 4)
+
         acc_psum := io.in_psum(i).asUInt + sr_psum.asUInt
         
-        in_psum := Mux( sr_last , 0.U, Mux(sr_valid, acc_psum, sr_psum))
-        io.out_sum(i).bits := Mux( sr_last, acc_psum, 0.U )
-        io.out_sum(i).valid := sr_last
+        // in_psum := Mux( sr_last , 0.U, Mux(sr_valid, acc_psum, sr_psum))
+        // in_psum := Mux( sr_last, acc_psum, )
+        // in_psum := Mux( state === Fsm.Output, io.in_psum(i).asUInt, Mux(sr_valid, acc_psum, sr_psum) )
+        in_psum := Mux( state === Fsm.Output || state === Fsm.Init , Mux(sr_valid, io.in_psum(i).asUInt, 0.U), Mux(sr_valid, acc_psum, sr_psum))
+        // io.out_sum(i).bits := Mux( sr_last, acc_psum, 0.U )
+        // io.out_sum(i).bits := Mux( state === Output, sr_psum, 0.U)
+        io.out_sum(i).bits := sr_psum
+        io.out_sum(i).valid := state === Fsm.Output
+        // io.out_sum(i).valid := sr_last
+
+
+        switch(state) {
+            is(Fsm.Init) {
+                when(cWrap) { state := Fsm.Acc }
+            }
+            is(Fsm.Acc) {
+                when(sr_last) {
+                    state := Fsm.Output
+                }
+            }
+            is(Fsm.Output) {
+                when(cWrap) { state := Fsm.Acc }
+            }
+        }
+
+
 
         (sr_psum, sr_last, sr_valid)
     }.unzip3
-
-    //TODO handle in_control
+    
 }
 
 class StaticTransposer[T <: Data](
@@ -195,12 +229,16 @@ class GemmCore[T <: Data](
     val transposer    = Module(new StaticTransposer(inputType.getWidth, rows, columns))
     val accumulator   = Module(new Accumulator(inputType, outputType, accType, rows, columns, df))
     
-    val wbAlignShiftRegister = Module(new CascadeDelayShiftRegister(columns, accType.getWidth))
+    val wbAlignShiftRegister = Module(new CascadeDelayShiftRegister(columns, accType.getWidth, Seq.tabulate(columns){i => columns-i} ))
 
 
 
     transposer.io.in.valid := Cat(io.in_valid).orR
-    transposer.io.in.bits  := io.in_a
+    // transposer.io.in.bits  := io.in_a
+    transposer.io.in.bits.zipWithIndex.map { case (in, i) => {
+        in := io.in_a(rows-1-i)
+    }}
+
 
     // VecInit(Seq.fill(rows) { 0.U(transposer.io.out.bits.head.getWidth.W) })
     meshWithDelay.io.in_a := Mux( transposer.io.out.valid,  transposer.io.out.bits, VecInit(Seq.fill(rows) { 0.U(transposer.io.out.bits.head.getWidth.W) }))
@@ -222,7 +260,8 @@ class GemmCore[T <: Data](
         in := accumulator.io.out_sum(i).bits
     }}
 
-    val valid = RegNext( accumulator.io.out_sum(0).valid )
+    // val valid = RegNext( accumulator.io.out_sum(0).valid )
+    val valid = ShiftRegister(accumulator.io.out_sum(0).valid, 4, false.B, true.B)
 
     io.out_c.bits     := wbAlignShiftRegister.io.out
     io.out_c.valid    := valid

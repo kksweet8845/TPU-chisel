@@ -41,33 +41,44 @@ class WbController[T <: Data](
     }
 
     val cur_fsm = withReset(reset.asAsyncReset) { RegInit(Fsm.Idle) }
-    
+    val freg            = RegInit(false.B)
     val cPtr            = FifoPtr.makeUpdatePtr(pow(2, addrBits).toInt)
+    val r_in_c          = Wire(Vec(columns, accType))
 
 
+    r_in_c.zipWithIndex.map{ case(in, i) => {
+        in := io.in_c.bits(columns-1-i)
+    }}
 
-    when((cur_fsm == Fsm.Idle).B) {
+
+    when((cur_fsm === Fsm.Idle)) {
         // cptr.reset
         cPtr.fpIn := cPtr.fp.copy(0.U, false.B)
         cPtr.update := true.B
-    }.elsewhen((cur_fsm == Fsm.Running).B) {
+    }.elsewhen((cur_fsm === Fsm.Running)) {
         when(io.in_c.valid) { cPtr.update := true.B }
         .otherwise{ cPtr.update := false.B }
+    }.otherwise {
+        cPtr.update := false.B
     }
 
-    io.finished := cPtr.fp.ptr === (io.csr.N_g * io.csr.M - 1.U) && io.C.wr_en
+
+    freg := io.C.wr_en && cPtr.fp.ptr === (io.csr.N_g * io.csr.M - 1.U)
+    io.finished := freg
+    // io.finished := (cur_fsm === Fsm.Running) && cPtr.fp.ptr === (io.csr.N_g * io.csr.M - 1.U) && io.C.wr_en
 
     io.C.wr_en := (cur_fsm === Fsm.Running) && (io.in_c.valid)
     io.C.index := cPtr.fp.ptr
-    io.C.data_in := io.in_c.bits.asUInt
+    // io.C.data_in := io.in_c.bits.asUInt
+    io.C.data_in := r_in_c.asUInt
 
 
 
     // cur_fsm := nxt_fsm
     switch(cur_fsm) {
         is(Fsm.Idle) {
-            when(io.start) { cur_fsm := Fsm.Idle }
-            .otherwise { cur_fsm := Fsm.Running }
+            when(io.start) { cur_fsm := Fsm.Running }
+            .otherwise { cur_fsm := Fsm.Idle }
         }
         is(Fsm.Running) {
             when(io.finished) { cur_fsm := Fsm.Idle }

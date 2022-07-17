@@ -21,13 +21,16 @@ class Mesh[T <: Data](
 )(implicit ar: Arithmetic[T]) extends Module with RequireAsyncReset {
 
 
+    val bType = if(df == Dataflow.WS) outputType else inputType
+    val dType = if(df == Dataflow.WS) inputType else accType
+
     val io = IO(new Bundle {
         val in_a = Input(Vec(rows, inputType))
-        val in_b = Input(Vec(columns, inputType))
-        val in_d = Input(Vec(columns, outputType))
+        val in_b = Input(Vec(columns, bType))
+        val in_d = Input(Vec(columns, dType))
         val out_a = Output(Vec(rows, inputType))
-        val out_b = Output(Vec(columns, inputType))
-        val out_c = Output(Vec(columns, outputType))
+        val out_b = Output(Vec(columns, bType))
+        val out_c = Output(Vec(columns, dType))
 
         val in_control = Input(Vec(columns, new PEControl(accType)))
         val out_control = Output(Vec(columns, new PEControl(accType)))
@@ -61,15 +64,15 @@ class Mesh[T <: Data](
 
 
     val interA = Seq.fill(rows, columns){ Reg(inputType) }
-    val interB = Seq.fill(rows, columns){ Reg(inputType) }
+    val interB = Seq.fill(rows, columns){ Reg(bType) }
     val interBT = interB.transpose
-    val interC = Seq.fill(rows, columns){ Reg(outputType) }
+    val interC = Seq.fill(rows, columns){ Reg(dType) }
     val interCT = interC.transpose
     val interCtrl = Seq.fill(rows, columns){ Reg(new PEControl(accType)) }
     val interCtrlT = interCtrl.transpose
-    val interValid = Seq.fill(rows, columns){ Reg(Bool()) }
+    val interValid = Seq.fill(rows, columns){ RegInit(false.B) }
     val interValidT = interValid.transpose
-    val interLast = Seq.fill(rows, columns){ Reg(Bool()) }
+    val interLast = Seq.fill(rows, columns){ RegInit(false.B) }
     val interLastT = interLast.transpose
 
 

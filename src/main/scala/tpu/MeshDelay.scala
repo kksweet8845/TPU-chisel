@@ -14,7 +14,8 @@ import chisel3.experimental.{prefix, noPrefix}
 
 class CascadeDelayShiftRegister[T <: Data](
     len:                Int,
-    elemWidth:               Int
+    elemWidth:          Int,
+    alignMask:          Seq[Int],
 )(implicit ar: Arithmetic[T]) extends Module with RequireAsyncReset {
 
 
@@ -25,8 +26,15 @@ class CascadeDelayShiftRegister[T <: Data](
     })
 
 
-    val cascade = io.in.zipWithIndex.map { case(ele, i) => {
-        val sr = ShiftRegister(ele, i+1)
+    // val cascade = io.in.zipWithIndex.map { case(ele, i) => {
+    //     val sr = ShiftRegister(ele, i+1)
+    //     val out = Wire(chiselTypeOf(sr))
+    //     out := sr
+    //     out
+    // }}
+
+    val cascade = io.in.zip(alignMask).map { case(ele, m) => {
+        val sr = ShiftRegister(ele, m)
         val out = Wire(chiselTypeOf(sr))
         out := sr
         out
@@ -119,7 +127,7 @@ class MeshDelay[T <: Data](
 
     val cascadeDelayValid = Seq.tabulate(columns) { i => 
         // val ii = i + 1
-        val sr = ShiftRegister(io.in_valid(i), columns-i)
+        val sr = ShiftRegister(io.in_valid(i), columns-i, false.B, true.B)
         val out = Wire(chiselTypeOf(sr))
         out := sr
         out
@@ -127,7 +135,7 @@ class MeshDelay[T <: Data](
 
     val cascadeDelayLast = Seq.tabulate(columns) { i => 
         // val ii = i + 1
-        val sr = ShiftRegister(io.in_last(i), columns - i)
+        val sr = ShiftRegister(io.in_last(i), columns - i, false.B, true.B)
         val out = Wire(chiselTypeOf(sr))
         out := sr
         out
